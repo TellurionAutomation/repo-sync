@@ -1,0 +1,20 @@
+* text=auto
+
+*.py   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.yml  text eol=lf
+
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+*.hsl  text eol=crlf
+*.hs_  text eol=crlf
+
+*.med  binary
+*.stp  binary
+*.lay  binary
+*.res  binary
+*.smt  binary

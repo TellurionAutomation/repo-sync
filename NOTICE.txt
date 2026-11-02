@@ -1,0 +1,5 @@
+repo-sync
+Copyright 2026 Tellurion LLC
+
+This product includes software developed by Tellurion LLC
+(https://tellurionautomation.com).

@@ -1,0 +1,11 @@
+Repo,URL,Directory,Tag,Critical,Device1,Device2,Device3
+Example-Library,https://github.com/githubtraining/hellogitworld.git,C:\Program Files (x86)\HAMILTON\Library\example-library,RELEASE_1.0,TRUE,All,,
+Example-Toolkit,https://github.com/libgit2/TestGitRepository.git,C:\Program Files (x86)\HAMILTON\Methods\Toolkits\example-toolkit,annotated_tag,TRUE,All,,
+Example-Fixtures,https://github.com/git-fixtures/tags.git,C:\Program Files (x86)\HAMILTON\Methods\Toolkits\example-fixtures,commit-tag,TRUE,All,,
+Method-A,https://github.com/githubtraining/hellogitworld.git,C:\Program Files (x86)\HAMILTON\Methods\Examples\method-a,RELEASE_1.0,,DEVICE_A,DEVICE_B,
+Method-B,https://github.com/libgit2/TestGitRepository.git,C:\Program Files (x86)\HAMILTON\Methods\Examples\method-b,annotated_tag,,DEVICE_A,DEVICE_C,
+Method-C,https://github.com/git-fixtures/tags.git,C:\Program Files (x86)\HAMILTON\Methods\Examples\method-c,annotated-tag,,DEVICE_B,,
+Method-D,https://github.com/githubtraining/hellogitworld.git,C:\Program Files (x86)\HAMILTON\Methods\Examples\method-d,RELEASE_1.0,,DEVICE_C,DEVICE_A,
+Method-E,https://github.com/libgit2/TestGitRepository.git,C:\Program Files (x86)\HAMILTON\Methods\Examples\method-e,annotated_tag,,All,,
+Method-F,https://github.com/git-fixtures/tags.git,C:\Program Files (x86)\HAMILTON\Methods\Examples\method-f,commit-tag,,DEVICE_A,,
+Method-G,https://github.com/githubtraining/hellogitworld.git,C:\Program Files (x86)\HAMILTON\Methods\Examples\method-g,RELEASE_1.1,,DEVICE_B,DEVICE_C,DEVICE_A

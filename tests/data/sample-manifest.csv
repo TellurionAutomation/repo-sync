@@ -1,0 +1,4 @@
+Repo,URL,Directory,Tag,Critical,Device1,Device2,Device3
+test-repo-1,https://github.com/TellurionAutomation/repo-sync-test-repo-one.git,test_repos/test-repo-1,v3,TRUE,All,,
+test-repo-2,https://github.com/TellurionAutomation/repo-sync-test-repo-two.git,test_repos/test-repo-2,v2.2,TRUE,DEVICE_A,,
+test-repo-3,https://github.com/TellurionAutomation/repo-sync-test-repo-three.git,test_repos/test-repo-3,v2.1.1,TRUE,DEVICE_B,,
