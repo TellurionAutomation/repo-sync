@@ -104,3 +104,7 @@ Found a bug or have a feature request? Open an issue on GitHub.
 Need help getting repo-sync set up, or want it adapted to your lab's workflow? Tellurion built and maintains this tool and can help. Email contact@tellurionautomation.com or use the form at https://tellurionautomation.com/contact.
 
 Tellurion also takes on broader lab automation work, from method development and instrument integration to scheduling and fleet monitoring. If there's something your lab wants to automate and you're not sure where to start, get in touch.
+
+## Acknowledgements
+
+This work is inspired by an open release of a script written by the incredibly talented Kalpesh Gupta. repo-sync expands on the idea, but would not have been possible without the ideas he shared. Thank you Kalpesh!
