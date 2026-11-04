@@ -27,3 +27,6 @@ repo_sync/config_local.py
 # Dummy repos used for testing
 /test_repos/
 .claude/
+
+# Arguments handed to repo-sync.bat by VENUS; deleted after each run
+/repo-sync-args.txt

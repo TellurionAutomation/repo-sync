@@ -6,6 +6,7 @@ Command options, what each command does, and how to run and configure repo-sync 
 - [How it works](#how-it-works)
 - [Exit codes](#exit-codes)
 - [Running on a schedule](#running-on-a-schedule)
+- [Calling from VENUS](#calling-from-venus)
 - [One run at a time](#one-run-at-a-time)
 - [Logs](#logs)
 - [Git behavior](#git-behavior)
@@ -96,6 +97,58 @@ Things to know:
 - **A blocked run doesn't retry by itself.** If Hamilton Run Control or Method Editor is open at the scheduled time, the run stops with exit code 3 and changes nothing. The next scheduled run tries again.
 - **Overlapping runs are safe.** If a manual run is still going when the scheduled one starts, the second run exits with code 3 (see [One run at a time](#one-run-at-a-time)).
 - **Check the result by exit code or log.** 0 means everything synced, 1 means some repos failed, and 3 means it didn't start. Each run writes its own file in `logs/`.
+
+## Calling from VENUS
+
+`repo-sync.bat` in the project root runs the tool from anywhere. It finds the project from its own location, creates the virtual environment on first use, and runs `sync.py`. The method never needs the path to the Python executable or `sync.py`, and doesn't have to write a batch file.
+
+The VENUS Shell step can only run a file, not pass it arguments, so the method hands the arguments over in a text file instead:
+
+1. Write the arguments, exactly as you'd type them after `py sync.py`, as a single line to `repo-sync-args.txt` in the project folder. Write it as plain ASCII text, not UTF-8 with a byte order mark:
+
+   ```
+   check main DEVICE_B --repo Method-A --output "C:\path\to\results.csv" --no-popup --no-pause
+   ```
+
+2. Run `C:\repo-sync\repo-sync.bat` with the Shell step, with "wait for the shell to finish" turned on so the method can read the exit code.
+
+`repo-sync.bat` reads the file and then deletes it, so an old file never runs by mistake. Always pass `--no-popup --no-pause`, or the run waits for someone to close a window or press a key.
+
+From a command prompt or Task Scheduler, pass the arguments directly instead, and no args file is read:
+
+```bat
+"C:\repo-sync\repo-sync.bat" check main DEVICE_B --no-popup --no-pause
+```
+
+The exit code is `sync.py`'s (see [Exit codes](#exit-codes)). It's 2 if there were no arguments and no `repo-sync-args.txt`, or one of these if the virtual environment couldn't be set up:
+
+| Code | Meaning |
+| --- | --- |
+| 10 | No Python 3.10 or later found (it tries `py -3`, then `python`). |
+| 11 | Creating the virtual environment failed. |
+| 12 | Installing the requirements failed, usually no network. The next run tries again. |
+
+The virtual environment is `.venv` in the project folder. Set `REPO_SYNC_VENV` to keep it somewhere else. The requirements are reinstalled whenever `requirements.txt` changes, for example after a sync pulls a new version of repo-sync. `setup_venv.bat [VENV_DIR]` does the setup step on its own, if you'd rather do it ahead of time.
+
+### Finding repo-sync from your own batch files
+
+`setup_venv.bat` also sets a `REPO_SYNC_HOME` environment variable for the current Windows user, pointing at the project folder. It runs every time `repo-sync.bat` does, so the variable gets fixed if the folder moves. Batch files that live elsewhere, such as one kept alongside a VENUS method, can then find repo-sync without a hard-coded path, so the same file works on every workstation:
+
+```bat
+@echo off
+if not defined REPO_SYNC_HOME (
+    echo REPO_SYNC_HOME is not set. Run setup_venv.bat in the repo-sync folder, then restart VENUS. 1>&2
+    exit /b 2
+)
+call "%REPO_SYNC_HOME%\repo-sync.bat" check main DEVICE_B --repo Method-A --no-popup --no-pause
+exit /b %ERRORLEVEL%
+```
+
+Things to know:
+
+- **Restart VENUS after the first setup.** Programs that were already open don't see a new environment variable.
+- **It's per user.** Run `setup_venv.bat` as the Windows account that runs VENUS. Setting it needs no admin rights and shows no prompt.
+- **The last setup wins.** Running `setup_venv.bat` from a second copy of repo-sync points the variable at that copy.
 
 ## One run at a time
 

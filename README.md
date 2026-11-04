@@ -14,10 +14,12 @@ Requires Python 3.10 or later and [git](https://git-scm.com/). Create the virtua
 **Windows**
 
 ```bat
-py -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+setup_venv.bat
 ```
+
+This creates `.venv` in the project root and installs the requirements. Pass a folder to put the venv somewhere else, for example `setup_venv.bat C:\repo-sync-venv`. It also sets the `REPO_SYNC_HOME` environment variable to the project folder, for batch files that need to find repo-sync. It's safe to run again: it does nothing unless the venv is missing or `requirements.txt` has changed.
+
+To run the tool from VENUS or anywhere else, call `repo-sync.bat` with the usual arguments. It sets up the venv if needed, so you can skip the step above. See [Calling from VENUS](docs/reference.md#calling-from-venus).
 
 **macOS / Linux**
 
