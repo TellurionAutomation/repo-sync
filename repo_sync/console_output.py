@@ -87,7 +87,12 @@ def show_popup(title: str, message: str) -> None:
     Does nothing if a window cannot be shown (e.g. no display, or tkinter
     is not available); the message is always logged as an error as well.
     """
-    logger.error("%s\n%s", title, message)
+    logger.error("%s\n\n%s", title, message)
+    show_window(title, message)
+
+
+def show_window(title: str, message: str) -> None:
+    """Like show_popup, but without logging, for callers that log a fuller message themselves"""
     try:
         import tkinter
         from tkinter import messagebox

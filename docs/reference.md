@@ -18,9 +18,8 @@ These options work with both commands:
 
 | Option | Description |
 | --- | --- |
-| `--no-pull` | Use the local copy of `BRANCH` without fetching it from the remote first. |
 | `--manifest PATH` | Path to the manifest. Default: `manifest/manifest.csv` in the project root, or `MANIFEST_PATH` from your [local settings](#configuration). |
-| `--local-manifest PATH` | Read this manifest as it is, without checking out a branch. Leave out `BRANCH`. Can't be combined with `--manifest` or `--no-pull`. |
+| `--local-manifest [PATH]` | Use the manifest file exactly as it is on disk, including uncommitted edits, instead of fetching and checking out `BRANCH`. Leave out `BRANCH`. Nothing is fetched or reset. With no `PATH`, reads the usual manifest (`--manifest`, or the default); `PATH` can be any manifest file, in a repo or not. Put it after `DEVICE`, so a `PATH` isn't mistaken for the device. |
 | `--log-dir PATH` | Folder for the log file. Default: `logs/` in the project root. |
 | `--no-popup` | Only log problems, without also showing a popup. Use this for unattended runs. |
 
@@ -46,14 +45,14 @@ The summaries below provide an overview of how the scripts work generally.
 ### `sync`
 
 1. Checks that nothing is open that would make the checkout fail. This tool was originally written for managing Hamilton computers, so by default it checks that Hamilton Run Control and Hamilton Method Editor are closed, and that the manifest isn't open in Excel. If something is open, the sync stops and asks the user to close it. To add or remove applications from this check, set `SYNC_INCOMPATIBLE_APPS` (applications that must be closed) or `MANIFEST_EDITORS` (applications that must not have the manifest open) in your [local settings](#configuration).
-2. Checks out the newest manifest from `BRANCH`, unless `--no-pull` or `--local-manifest` is used.
+2. Fetches the manifest's repo and checks out the newest manifest from `BRANCH`, discarding any local edits to it (with a warning). With `--local-manifest`, this step is skipped and the file is read as it is.
 3. Selects the repos for `DEVICE`.
-4. Syncs those repos several at a time. Repos that don't exist yet are cloned. A folder that is already a clone of a different remote (for example, because the repo's URL changed in the manifest) is reported as a failure and left alone; delete or re-clone it to fix it. Each repo is then checked out at its tag, which leaves it on a detached HEAD. Changes to tracked files are discarded. Untracked files are left alone unless they're in the way of the checkout. The remote is only contacted if the tag isn't known locally.
-5. Reports any failures in a popup and in the log.
+4. Syncs those repos several at a time. Repos that don't exist yet are cloned. A folder that is already a clone of a different remote (for example, because the repo's URL changed in the manifest) is reported as a failure and left alone; delete or re-clone it to fix it. Each repo is then checked out at its tag, which leaves it on a detached HEAD. Changes to tracked files are discarded. Untracked files are left alone unless they're in the way of the checkout. The remote is only contacted if the tag isn't known locally. If the tag isn't on the remote either, the error suggests what was probably meant: the same tag in different capitalization, otherwise up to three close spellings, otherwise the three newest tags.
+5. Reports any failures in a popup and in the log. Popups can't scroll, so a long list shows the first failures that fit in `POPUP_MAX_CHARS` and ends with how many more failed and the path of the log, which always has all of them.
 
 ### `check`
 
-Like `sync`, `check` first makes sure the manifest isn't open in an editor, checks out the newest manifest from `BRANCH` (unless `--no-pull` or `--local-manifest` is used) and selects the repos for `DEVICE`. It doesn't require applications defined in `SYNC_INCOMPATIBLE_APPS` in the [configuration](#configuration) to be closed. Rather than updating the repos, `check` just compares the current state against what is expected from the manifest. It never contacts the repos' remotes, so a tag that hasn't been fetched yet counts as out of date. Repos will be assigned one of the following results depending on what is found:
+Like `sync`, `check` first makes sure the manifest isn't open in an editor, checks out the newest manifest from `BRANCH` (unless `--local-manifest` is used) and selects the repos for `DEVICE`. It doesn't require applications defined in `SYNC_INCOMPATIBLE_APPS` in the [configuration](#configuration) to be closed. Rather than updating the repos, `check` just compares the current state against what is expected from the manifest. It never contacts the repos' remotes, so a tag that hasn't been fetched yet counts as out of date. Repos will be assigned one of the following results depending on what is found:
 
 - `OK`: the repo is at its tag, with no changes to tracked files.
 - `DIRTY`: the repo is at its tag, but tracked files have been changed.
@@ -177,6 +176,7 @@ Default settings are in [repo_sync/config.py](../repo_sync/config.py):
 | `MANIFEST_PATH` | `manifest/manifest.csv` | Where the manifest is read from |
 | `MAX_WORKERS` | 4 | Repos synced at the same time |
 | `FINISH_PAUSE_SECONDS` | 5 | Pause before the console closes after a sync |
+| `POPUP_MAX_CHARS` | 1500 | How much of a long problem list a popup shows; the rest is counted in a closing line that points to the log |
 | `GIT_CONNECT_TIMEOUT_SECONDS` | 30 | How long SSH waits to connect |
 | `GIT_STALL_TIMEOUT_SECONDS`, `GIT_STALL_MIN_BYTES_PER_SECOND` | 60, 1000 | When a stalled transfer is dropped |
 | `LOCK_PATH` | `repo-sync.lock` | The file that stops two runs overlapping |

@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 
 import git
 
-from repo_sync.repo import Repository
+from repo_sync.repo import Repository, redact_urls
 
 ALL_DEVICES = "ALL"
 _REQUIRED_COLUMNS = ["Repo", "URL", "Directory", "Tag", "Critical"]
@@ -161,7 +161,7 @@ def read_manifest(path: str | Path) -> list[ManifestEntry]:
             )
             continue
         if not is_valid_url(url):
-            problems.append(f"Row {line_number} ({name}): URL is malformed: {url}")
+            problems.append(f"Row {line_number} ({name}): URL is malformed: {redact_urls(url)}")
             continue
 
         entries.append(
@@ -222,39 +222,54 @@ def select_entries(
     return selected
 
 
-def checkout_manifest(path: str | Path, branch: str, pull: bool = True) -> None:
-    """Checks out the head of branch in the repo containing the manifest.
+def checkout_manifest(path: str | Path, branch: str) -> None:
+    """Fetches the manifest's repo and checks out the remote's head of branch.
 
-    Any local changes to the manifest repo are discarded. When pulling,
-    the local branch is reset to the remote's copy of it, so it does not
-    matter whether this computer has used the branch before.
+    Any local changes to the manifest repo are discarded, and the local
+    branch is reset to the remote's copy of it, so it does not matter whether
+    this computer has used the branch before.
 
     Args:
         path: Path to the manifest, which must be in the top folder of its repo.
             Parent folders are not searched, so a file inside some other repo
             can never cause that repo to be checked out.
         branch: Branch of the manifest repo to check out.
-        pull: If False, use the local copy of branch without contacting the remote.
 
     Raises:
         ManifestError: If the repo or branch cannot be found, or the remote
             cannot be reached.
     """
+    folder = Path(path).parent
     try:
-        repo = git.Repo(Path(path).parent)
-        if pull:
-            repo.remotes.origin.fetch()
-            repo.git.checkout("-B", branch, f"origin/{branch}", force=True)
-        else:
-            repo.git.checkout(branch, force=True)
+        repo = git.Repo(folder)
+        if "origin" not in [remote.name for remote in repo.remotes]:
+            raise ManifestError(
+                [
+                    f"Could not check out branch '{branch}' of the manifest repo for {path}: "
+                    f"{folder} has no remote named 'origin' to pull from. "
+                    "Add one, or run with --local-manifest to read the manifest as it is."
+                ]
+            )
+        repo.remotes.origin.fetch()
+        repo.git.checkout("-B", branch, f"origin/{branch}", force=True)
     except (
         git.GitCommandError,
         git.InvalidGitRepositoryError,
         git.NoSuchPathError,
     ) as e:
+        # The repo errors stringify to just the folder, so say what was wrong
+        if isinstance(e, git.NoSuchPathError):
+            reason = f"the folder {folder} does not exist"
+        elif isinstance(e, git.InvalidGitRepositoryError):
+            reason = (
+                f"{folder} is not a git repo (it has no .git folder; "
+                "the manifest must be in the top folder of a cloned repo)"
+            )
+        else:
+            reason = str(e)
         raise ManifestError(
             [
-                f"Could not check out branch '{branch}' of the manifest repo for {path}: {e}"
+                f"Could not check out branch '{branch}' of the manifest repo for {path}: {reason}"
             ]
         ) from e
 

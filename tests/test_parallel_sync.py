@@ -382,3 +382,15 @@ def test_sync_result_ok() -> None:
     repo = Repository("test", "url", "dir")
     assert SyncResult(repo=repo, tag="v1").ok
     assert not SyncResult(repo=repo, tag="v1", error=RuntimeError()).ok
+
+
+def test_short_error_hides_credentials() -> None:
+    error = git.GitCommandError(
+        ["git", "clone", "https://ghp_tok@github.com/o/r"],
+        128,
+        stderr="fatal: unable to access 'https://ghp_tok@github.com/o/r/': 403\n",
+    )
+    assert parallel_sync.short_error(error) == (
+        "unable to access 'https://***@github.com/o/r/': 403"
+    )
+    assert "ghp_tok" not in parallel_sync.short_error(ValueError("https://ghp_tok@h/r"))
