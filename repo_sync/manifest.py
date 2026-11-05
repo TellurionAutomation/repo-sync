@@ -240,9 +240,18 @@ def checkout_manifest(path: str | Path, branch: str, pull: bool = True) -> None:
         ManifestError: If the repo or branch cannot be found, or the remote
             cannot be reached.
     """
+    folder = Path(path).parent
     try:
-        repo = git.Repo(Path(path).parent)
+        repo = git.Repo(folder)
         if pull:
+            if "origin" not in [remote.name for remote in repo.remotes]:
+                raise ManifestError(
+                    [
+                        f"Could not check out branch '{branch}' of the manifest repo for {path}: "
+                        f"{folder} has no remote named 'origin' to pull from. "
+                        "Add one, or run with --no-pull to use the local branch."
+                    ]
+                )
             repo.remotes.origin.fetch()
             repo.git.checkout("-B", branch, f"origin/{branch}", force=True)
         else:
@@ -252,9 +261,19 @@ def checkout_manifest(path: str | Path, branch: str, pull: bool = True) -> None:
         git.InvalidGitRepositoryError,
         git.NoSuchPathError,
     ) as e:
+        # The repo errors stringify to just the folder, so say what was wrong
+        if isinstance(e, git.NoSuchPathError):
+            reason = f"the folder {folder} does not exist"
+        elif isinstance(e, git.InvalidGitRepositoryError):
+            reason = (
+                f"{folder} is not a git repo (it has no .git folder; "
+                "the manifest must be in the top folder of a cloned repo)"
+            )
+        else:
+            reason = str(e)
         raise ManifestError(
             [
-                f"Could not check out branch '{branch}' of the manifest repo for {path}: {e}"
+                f"Could not check out branch '{branch}' of the manifest repo for {path}: {reason}"
             ]
         ) from e
 

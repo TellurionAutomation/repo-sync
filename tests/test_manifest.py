@@ -580,8 +580,17 @@ def test_manifest_in_a_subfolder_of_a_repo_is_rejected(
 
 
 def test_checkout_not_in_a_repo(tmp_path: Path) -> None:
-    with pytest.raises(ManifestError, match="Could not check out branch 'main'"):
+    with pytest.raises(
+        ManifestError, match="Could not check out branch 'main'.*is not a git repo"
+    ):
         checkout_manifest(tmp_path / "manifest.csv", "main")
+
+
+def test_checkout_missing_folder(tmp_path: Path) -> None:
+    with pytest.raises(
+        ManifestError, match="Could not check out branch 'main'.*does not exist"
+    ):
+        checkout_manifest(tmp_path / "gone" / "manifest.csv", "main")
 
 
 @pytest.mark.parametrize("pull", [True, False])
@@ -593,6 +602,16 @@ def test_checkout_missing_branch(
         ManifestError, match="Could not check out branch 'no-such-branch'"
     ):
         checkout_manifest(manifest, "no-such-branch", pull=pull)
+
+
+def test_checkout_without_origin(manifest_remote: Path, tmp_path: Path) -> None:
+    manifest = clone(manifest_remote, tmp_path)
+    run_git(manifest.parent, "remote", "remove", "origin")
+    with pytest.raises(ManifestError, match="no remote named 'origin'.*--no-pull"):
+        checkout_manifest(manifest, "main")
+    # Without pulling, the local branch is still usable
+    checkout_manifest(manifest, "test", pull=False)
+    assert read_manifest(manifest)[0].tag == "v-test"
 
 
 def test_checkout_unreachable_remote(manifest_remote: Path, tmp_path: Path) -> None:
