@@ -42,7 +42,7 @@ def no_blockers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def manifest(tmp_path: Path) -> Path:
-    """A manifest repo with the sample file on branch "main" and different tags on branch "test".
+    """A clone of a manifest repo with the sample file on branch "main" and different tags on branch "test".
 
     Each Windows directory in the sample is moved into tmp_path.
     """
@@ -60,9 +60,12 @@ def manifest(tmp_path: Path) -> Path:
         for row in rows
     ]
 
-    repo = tmp_path / "manifest-repo"
-    commit_manifest(repo, "test", test_rows)
-    return commit_manifest(repo, "main", rows)
+    # Runs pull the manifest from a local remote, as a lab machine would from GitHub
+    remote = tmp_path / "manifest-remote"
+    commit_manifest(remote, "test", test_rows)
+    commit_manifest(remote, "main", rows)
+    run_git(tmp_path, "clone", "-q", str(remote), "manifest-repo")
+    return tmp_path / "manifest-repo" / "manifest.csv"
 
 
 def run(manifest: Path, command: str, *args: str) -> int:
@@ -73,7 +76,6 @@ def run(manifest: Path, command: str, *args: str) -> int:
             *args,
             "--manifest",
             str(manifest),
-            "--no-pull",
             "--no-popup",
             "--log-dir",
             str(manifest.parent.parent / "logs"),

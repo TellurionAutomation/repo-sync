@@ -6,6 +6,7 @@ with important functions for this script isolated.
 
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
+import re
 
 import git
 
@@ -13,18 +14,131 @@ from repo_sync.repo_status import RepositoryStatus
 
 _PEELED_SUFFIX = "^{}"
 
+# Tags offered when a tag isn't on the remote, and how alike a spelling must
+# be to count as close (difflib's ratio, 0 to 1)
+_SUGGESTED_TAGS = 3
+_CLOSE_TAG_RATIO = 0.6
 
-def _normalize_url(url: str) -> str:
-    """Reduces url to a form where two spellings of the same remote compare equal.
 
-    A trailing slash or ".git" is dropped, and local paths are normalized
-    (case-insensitively on Windows), so "C:/git/repo.git" and "c:\\git\\repo"
-    match there.
+# Network URLs: "scheme://[user@]host[:port]/path"
+_NETWORK_URL = re.compile(
+    r"^(?P<scheme>ssh|git|https?)://(?:[^@/]+@)?(?P<host>[^/:]+)(?::\d*)?/(?P<path>.*)$",
+    re.IGNORECASE,
+)
+# scp-style SSH: "[user@]host:path". A one-letter host is a Windows drive ("C:/...").
+_SCP_URL = re.compile(r"^(?:[^@/]+@)?(?P<host>[^/:\\]{2,}):(?!//)(?P<path>.*)$")
+# The "user[:password]@" part of any "scheme://" URL in a piece of text
+_URL_USERINFO = re.compile(r"(?P<scheme>\b[a-z][a-z0-9+.-]*://)(?P<userinfo>[^/@\s'\"]+)@", re.IGNORECASE)
+
+
+def redact_urls(text: str) -> str:
+    """Hides credentials in any URLs within text, so they are safe to show or log.
+
+    Passwords are always hidden. For HTTP(S) the user name is hidden too,
+    since a token is often passed there ("https://<token>@github.com/...").
+    SSH user names such as "git@" are not secret and are kept.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        scheme, userinfo = match["scheme"], match["userinfo"]
+        if scheme.lower().startswith("http"):
+            return f"{scheme}***@"
+        user, has_password, _ = userinfo.partition(":")
+        return f"{scheme}{user}:***@" if has_password else match[0]
+
+    return _URL_USERINFO.sub(replace, text)
+
+
+def _parse_url(url: str) -> tuple[str | None, str]:
+    """Splits url into its protocol and a location that is the same for every spelling of it.
+
+    A trailing slash or ".git" is dropped. Network remotes reduce to
+    "host/path" whatever the user or port, so "git@github.com:org/repo.git"
+    and "ssh://git@github.com/org/repo" are the same SSH location, and
+    "https://github.com/org/repo" is that location over HTTPS. Local paths
+    are normalized (case-insensitively on Windows), so "C:/git/repo.git" and
+    "c:\\git\\repo" match there; their protocol is None.
+
+    Returns:
+        The protocol ("SSH", "HTTPS", "HTTP", "git" or None) and the location.
     """
     url = url.strip().rstrip("/\\").removesuffix(".git")
-    if PurePosixPath(url).is_absolute() or PureWindowsPath(url).is_absolute():
-        return os.path.normcase(os.path.normpath(url))
-    return url
+    if match := _NETWORK_URL.match(url):
+        scheme = match["scheme"].lower()
+        protocol = "git" if scheme == "git" else scheme.upper()
+    elif match := _SCP_URL.match(url):
+        protocol = "SSH"
+    else:
+        if PurePosixPath(url).is_absolute() or PureWindowsPath(url).is_absolute():
+            url = os.path.normcase(os.path.normpath(url))
+        return None, url
+    return protocol, f"{match['host'].lower()}/{match['path'].strip('/')}"
+
+
+def _version_key(tag: str) -> tuple[tuple[int, int | str], ...]:
+    """Sorts tags by version, so "v1.10" comes after "v1.9" rather than before it"""
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part.lower())
+        for part in re.split(r"(\d+)", tag)
+        if part
+    )
+
+
+def _common_prefix_length(a: str, b: str) -> int:
+    return len(os.path.commonprefix([a, b]))
+
+
+def suggest_tags(tag: str, tags: list[str]) -> str:
+    """Describes the tags on a remote that tag was probably meant to be.
+
+    Tried in this order, stopping at the first that finds something:
+
+    1. The same name in different capitalization, e.g. "V1.0" for "v1.0".
+    2. Up to three close spellings, e.g. "v1.0.0" or "1.0" for "v1.0". They
+       are ranked by how alike they are (ignoring case), then by how much of
+       the start they share with tag, then by version, so "v1.0.0" beats
+       "v9.1.0" even though difflib alone rates them the same.
+    3. The three newest tags by version number, since ls-remote gives no dates.
+
+    Returns:
+        A sentence to add to a "tag not found" message.
+    """
+    if not tags:
+        return "The remote has no tags."
+
+    wanted = tag.lower()
+    same_name = sorted(t for t in tags if t.lower() == wanted)
+    if same_name:
+        listed = " or ".join(f'"{t}"' for t in same_name)
+        return f"Did you mean {listed}? Tags are case-sensitive."
+
+    import difflib  # Only needed on this failure path
+
+    matcher = difflib.SequenceMatcher(b=wanted)
+    scored: list[tuple[float, str]] = []
+    for candidate in tags:
+        matcher.set_seq1(candidate.lower())
+        # The cheap upper bounds skip most tags without the full comparison
+        if (
+            matcher.real_quick_ratio() >= _CLOSE_TAG_RATIO
+            and matcher.quick_ratio() >= _CLOSE_TAG_RATIO
+            and (ratio := matcher.ratio()) >= _CLOSE_TAG_RATIO
+        ):
+            scored.append((ratio, candidate))
+    if scored:
+        scored.sort(
+            key=lambda item: (
+                -item[0],
+                -_common_prefix_length(item[1].lower(), wanted),
+                _version_key(item[1]),
+            )
+        )
+        listed = ", ".join(f'"{t}"' for _, t in scored[:_SUGGESTED_TAGS])
+        return f"Closest tags on the remote: {listed}."
+
+    newest = sorted(tags, key=_version_key, reverse=True)[:_SUGGESTED_TAGS]
+    listed = ", ".join(f'"{t}"' for t in newest)
+    return f"Newest tags on the remote: {listed}."
 
 
 class Repository:
@@ -82,21 +196,36 @@ class Repository:
         Stops a sync from checking out tags from the wrong remote when a
         manifest row's URL has changed since the folder was cloned.
 
+        A clone of the same repository over a different protocol (e.g. HTTPS
+        when url is SSH) is not accepted either, since fetching and listing
+        tags would then use different credentials.
+
         Raises:
-            ValueError: If the repo has no "origin" remote or it points
-                somewhere other than url.
+            ValueError: If the repo has no "origin" remote, it points
+                somewhere other than url, or it reaches the same repository
+                over a different protocol.
             git.InvalidGitRepositoryError: If local_dir is not a git repo.
             git.NoSuchPathError: If local_dir does not exist.
         """
         repo = self.initialize_repo_object()
+        expected = redact_urls(self.url)
         if "origin" not in [remote.name for remote in repo.remotes]:
             raise ValueError(
-                f'{self.local_dir} has no "origin" remote; expected a clone of "{self.url}"'
+                f'{self.local_dir} has no "origin" remote; expected a clone of "{expected}"'
             )
         origin = repo.remotes.origin.url
-        if _normalize_url(origin) != _normalize_url(self.url):
+        origin_protocol, origin_location = _parse_url(origin)
+        protocol, location = _parse_url(self.url)
+        if origin_location != location:
             raise ValueError(
-                f'{self.local_dir} is a clone of "{origin}", not "{self.url}"'
+                f'{self.local_dir} is a clone of "{redact_urls(origin)}", not "{expected}"'
+            )
+        if origin_protocol != protocol:
+            raise ValueError(
+                f"{self.local_dir} is a clone of the right repository, but over "
+                f'{origin_protocol} ("{redact_urls(origin)}") while the manifest uses '
+                f'{protocol} ("{expected}"). Either delete the folder so it is cloned '
+                "again, or change the manifest URL to match"
             )
 
     def get_remote_tags(self, refresh: bool = False) -> dict[str, str]:
@@ -171,7 +300,8 @@ class Repository:
                 that do not conflict with the checkout are left alone.
 
         Raises:
-            ValueError: If the tag does not exist locally or on the remote.
+            ValueError: If the tag does not exist locally or on the remote. The
+                message suggests tags it may have been meant to be.
             git.InvalidGitRepositoryError: If local_dir is not a git repo.
             git.NoSuchPathError: If local_dir does not exist.
             git.GitCommandError: If the fetch or checkout fails.
@@ -179,20 +309,25 @@ class Repository:
         repo = self.initialize_repo_object()
 
         if tag not in repo.tags:
-            not_found = ValueError(
-                f'Tag "{tag}" not found for repository "{self.name}"'
-            )
             if self._remote_tags is not None and tag not in self._remote_tags:
-                raise not_found
+                raise self._tag_not_found(tag, self._remote_tags)
             try:
                 repo.remotes.origin.fetch(f"refs/tags/{tag}:refs/tags/{tag}")
             except git.GitCommandError:
                 # Only spend a second remote call working out why the fetch failed.
-                if tag not in self.get_remote_tags():
-                    raise not_found from None
+                remote_tags = self.get_remote_tags()
+                if tag not in remote_tags:
+                    raise self._tag_not_found(tag, remote_tags) from None
                 raise
 
         repo.git.checkout(tag, force=destructive)
+
+    def _tag_not_found(self, tag: str, remote_tags: dict[str, str]) -> ValueError:
+        """The error for a tag missing from the remote, suggesting what was meant"""
+        return ValueError(
+            f'Tag "{tag}" not found for repository "{self.name}". '
+            f"{suggest_tags(tag, list(remote_tags))}"
+        )
 
     def get_status(self, tag: str) -> RepositoryStatus:
         """Compares the local repo to tag without contacting the remote.

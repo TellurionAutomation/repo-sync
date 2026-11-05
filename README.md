@@ -57,7 +57,7 @@ py sync.py COMMAND BRANCH DEVICE [options]
 or for a local untracked manifest:
 
 ```bat
-py sync.py COMMAND DEVICE --local-manifest C:/path/to/manifest.csv [options]
+py sync.py COMMAND DEVICE --local-manifest [C:/path/to/manifest.csv] [options]
 ```
 
 `python -m repo_sync` also works.
@@ -77,7 +77,10 @@ py sync.py sync main DEVICE_B --dry-run
 :: Check one repo plus the critical repos, and write the results to a CSV
 py sync.py check main DEVICE_B --repo Method-A --output C:/path/to/results.csv
 
-:: Use a manifest that isn't in a repo (no BRANCH, no checkout)
+:: Use the usual manifest as it is on disk, with uncommitted edits (no BRANCH, no checkout)
+py sync.py sync DEVICE_B --local-manifest
+
+:: Use a manifest that isn't in a repo
 py sync.py sync DEVICE_B --local-manifest C:/path/to/test-manifest.csv
 ```
 

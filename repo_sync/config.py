@@ -16,6 +16,13 @@ MAX_WORKERS = 4
 # Seconds to leave the console open after a sync so users can read the result
 FINISH_PAUSE_SECONDS = 5
 
+# Most characters of problems a popup lists. Whole problems are shown in
+# order until the next would go over; the rest are counted in a closing line
+# that points to the log. Popups can't scroll, so this keeps the OK button and
+# that closing line on screen. About 60-70% of a 1080p screen; lower it for
+# small screens or high display scaling.
+POPUP_MAX_CHARS = 1500
+
 # Network limits that make git fail instead of hanging on a dead or unresponsive
 # remote; see git_environment.py
 GIT_CONNECT_TIMEOUT_SECONDS = 30

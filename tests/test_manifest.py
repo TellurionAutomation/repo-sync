@@ -529,42 +529,6 @@ def test_checkout_resets_diverged_local_branch(
     assert read_manifest(manifest)[0].tag == "v-main-2"
 
 
-def test_no_pull_uses_local_copy_of_branch(
-    manifest_remote: Path, tmp_path: Path, remote_calls: list[str]
-) -> None:
-    manifest = clone(manifest_remote, tmp_path)
-    checkout_manifest(manifest, "main")
-    commit_manifest(
-        manifest_remote,
-        "main",
-        [["A", "https://example.com/repo.git", "dir", "v-main-2", "", "All"]],
-    )
-    run_git(manifest.parent, "checkout", "-q", "test")
-    manifest.write_text("local edit\n")
-    remote_calls.clear()
-
-    checkout_manifest(manifest, "main", pull=False)
-
-    assert remote_calls == []
-    assert run_git(manifest.parent, "rev-parse", "--abbrev-ref", "HEAD") == "main"
-    assert read_manifest(manifest)[0].tag == "v-main"
-
-
-def test_no_pull_works_without_a_remote(tmp_path: Path) -> None:
-    manifest = commit_manifest(
-        tmp_path / "manifest-repo",
-        "main",
-        [["A", "https://example.com/repo.git", "dir", "v1", "", "All"]],
-    )
-    commit_manifest(
-        tmp_path / "manifest-repo",
-        "test",
-        [["A", "https://example.com/repo.git", "dir", "v2", "", "All"]],
-    )
-    checkout_manifest(manifest, "main", pull=False)
-    assert read_manifest(manifest)[0].tag == "v1"
-
-
 def test_manifest_in_a_subfolder_of_a_repo_is_rejected(
     manifest_remote: Path, tmp_path: Path
 ) -> None:
@@ -593,25 +557,21 @@ def test_checkout_missing_folder(tmp_path: Path) -> None:
         checkout_manifest(tmp_path / "gone" / "manifest.csv", "main")
 
 
-@pytest.mark.parametrize("pull", [True, False])
-def test_checkout_missing_branch(
-    manifest_remote: Path, tmp_path: Path, pull: bool
-) -> None:
+def test_checkout_missing_branch(manifest_remote: Path, tmp_path: Path) -> None:
     manifest = clone(manifest_remote, tmp_path)
     with pytest.raises(
         ManifestError, match="Could not check out branch 'no-such-branch'"
     ):
-        checkout_manifest(manifest, "no-such-branch", pull=pull)
+        checkout_manifest(manifest, "no-such-branch")
 
 
 def test_checkout_without_origin(manifest_remote: Path, tmp_path: Path) -> None:
     manifest = clone(manifest_remote, tmp_path)
     run_git(manifest.parent, "remote", "remove", "origin")
-    with pytest.raises(ManifestError, match="no remote named 'origin'.*--no-pull"):
+    with pytest.raises(
+        ManifestError, match="no remote named 'origin'.*--local-manifest"
+    ):
         checkout_manifest(manifest, "main")
-    # Without pulling, the local branch is still usable
-    checkout_manifest(manifest, "test", pull=False)
-    assert read_manifest(manifest)[0].tag == "v-test"
 
 
 def test_checkout_unreachable_remote(manifest_remote: Path, tmp_path: Path) -> None:

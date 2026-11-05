@@ -51,8 +51,18 @@ If whole groups of devices differ on many repos, a separate manifest branch for 
 
 ## Local manifest
 
-If you'd rather just have a single local manifest (for example, for testing), you can run the script with a `--local-manifest` flag to indicate that you'd like to use a manifest file on the machine that is not currently in a repository. `BRANCH` is left out, and no checkout is done:
+Normally each run fetches the manifest's repo and checks out `BRANCH`, which discards any edits to the manifest on this machine. To try out edits before committing them, or to use a manifest that isn't in a repo at all, run with `--local-manifest`. `BRANCH` is left out, nothing is fetched or checked out, and the file is read exactly as it is on disk.
+
+On its own, `--local-manifest` reads the usual manifest, edits included:
+
+```bat
+py sync.py sync DEVICE_B --local-manifest
+```
+
+Or give it the path of any other manifest file:
 
 ```bat
 py sync.py sync DEVICE_B --local-manifest C:/path/to/test-manifest.csv
 ```
+
+Put `--local-manifest` after `DEVICE`, so a path isn't mistaken for the device.

@@ -9,14 +9,17 @@ Usage, e.g.:
   py sync.py sync main DEVICE_B
   py sync.py sync main DEVICE_B --dry-run
   py sync.py check main DEVICE_B --output C:/path/to/results.csv --repo Method-A
+  py sync.py sync DEVICE_B --local-manifest
   py sync.py sync DEVICE_B --local-manifest C:/path/to/test-manifest.csv
 
-Both commands first check out the head of BRANCH in the manifest's repo,
-so each branch of the manifest can list different tags. --no-pull uses
-the local copy of the branch without contacting the remote.
+Both commands first fetch the manifest's repo and check out the head of
+BRANCH, discarding any local edits to the manifest, so each branch of the
+manifest can list different tags.
 
---local-manifest reads the given file as it is, e.g. for testing a manifest
-that is not in a repo. BRANCH is left out and no checkout is done.
+--local-manifest skips that: BRANCH is left out, nothing is fetched or
+checked out, and the manifest file is read exactly as it is on disk, edits
+and all. With no path it reads the usual manifest; with a path it reads that
+file, which does not need to be in a repo.
 
 Exit codes (see ExitCode) are the same for both commands.
 """
@@ -29,7 +32,7 @@ import time
 
 from repo_sync import config
 from repo_sync import repo_check
-from repo_sync.console_output import log_to_file, logger, show_popup
+from repo_sync.console_output import log_to_file, logger, show_window
 from repo_sync.git_environment import configure_non_interactive_git
 from repo_sync.manifest import (
     ManifestEntry,
@@ -64,6 +67,10 @@ class ExitCode(IntEnum):
     INTERRUPTED = 130  # Stopped with Ctrl+C
 
 
+# Stands in for the path when --local-manifest is given without one
+_USUAL_MANIFEST = Path("<usual manifest>")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Creates the parser for the sync and check commands"""
     common = argparse.ArgumentParser(add_help=False)
@@ -81,11 +88,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Device ID, matched against the device columns; 'ALL' selects every repo.",
     )
     common.add_argument(
-        "--no-pull",
-        action="store_true",
-        help="Use the local copy of BRANCH without fetching it from the remote first.",
-    )
-    common.add_argument(
         "--manifest",
         type=Path,
         help=f"Path to the manifest (default: {config.MANIFEST_PATH}).",
@@ -93,8 +95,16 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--local-manifest",
         type=Path,
+        nargs="?",
+        const=_USUAL_MANIFEST,
         metavar="PATH",
-        help="Read this manifest as it is, without checking out a branch; it does not need to be in a repo.",
+        help=(
+            "Use the manifest file exactly as it is on disk, including uncommitted edits, "
+            "instead of fetching and checking out BRANCH (leave BRANCH out). Nothing is "
+            "fetched or reset. With no PATH, reads the usual manifest (--manifest, or "
+            f"{config.MANIFEST_PATH}); PATH can be any manifest file, in a repo or not. "
+            "Put it after DEVICE, or PATH will be mistaken for DEVICE."
+        ),
     )
     common.add_argument(
         "--log-dir",
@@ -163,14 +173,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         # The only positional given is the device, which argparse fills in as the branch
         if args.device is not None:
             parser.error("BRANCH cannot be used with --local-manifest")
-        for option, used in (
-            ("--manifest", args.manifest is not None),
-            ("--no-pull", args.no_pull),
-        ):
-            if used:
-                parser.error(f"{option} cannot be used with --local-manifest")
+        given_path = args.local_manifest is not _USUAL_MANIFEST
+        if args.branch is None and given_path:
+            parser.error(
+                f"the following arguments are required: DEVICE (if '{args.local_manifest}' "
+                "is the device, put --local-manifest after it)"
+            )
+        if given_path and args.manifest is not None:
+            parser.error(
+                "give the path to either --manifest or --local-manifest, not both"
+            )
         args.device, args.branch = args.branch, None
-        args.manifest = args.local_manifest
+        if given_path:
+            args.manifest = args.local_manifest
+        else:
+            args.manifest = args.manifest or config.MANIFEST_PATH
+            args.local_manifest = args.manifest
     elif args.device is None:
         parser.error("the following arguments are required: BRANCH, DEVICE")
     elif args.manifest is None:
@@ -192,7 +210,9 @@ def main(argv: list[str] | None = None) -> int:
         log_name = config.LoggingConfig.SYNC_LOG_FILENAME
     log_dir = args.log_dir or config.LoggingConfig.LOG_DIR
 
-    with log_to_file(log_dir, log_name):
+    with log_to_file(log_dir, log_name) as log_path:
+        # Popups that leave problems out point here for the full list
+        args.log_path = log_path
         try:
             with run_lock(config.LOCK_PATH) as locked:
                 if not locked:
@@ -242,15 +262,104 @@ def _report_problems(
     title: str,
     problems: list[str],
     advice: str = DEFAULT_ADVICE,
+    *,
+    more: tuple[str, str] = ("problem", "problems"),
+    separator: str = "\n\n",
 ) -> None:
-    """Logs problems as an error and, unless disabled, shows them in a popup"""
-    message = "\n".join(problems)
+    """Logs every problem as an error and, unless disabled, shows them in a popup.
+
+    The log always gets the full list. The popup can't scroll, so it shows as
+    many whole problems as fit in config.POPUP_MAX_CHARS (see
+    _fit_problems) and says what was left out and where to find it.
+
+    Args:
+        args: The parsed arguments; uses no_popup and log_path.
+        title: Window title, and the first line of the logged message.
+        problems: The problems, in the order to show them.
+        advice: What the user should do, shown after the problems.
+        more: How a count of left-out problems is described, singular and
+            plural, e.g. ("repo failed", "repos failed") for
+            "...and 3 more repos failed."
+        separator: Text between problems; blank lines by default, since
+            several long paths run together otherwise.
+    """
+    logger.error("%s\n\n%s", title, _join_problems(problems, advice, separator))
+    if args.no_popup:
+        return
+
+    shown, omitted, shortened = _fit_problems(
+        problems, config.POPUP_MAX_CHARS, separator
+    )
+    message = separator.join(shown)
+    if omitted or shortened:
+        message += "\n\n" + _left_out_note(
+            omitted, shortened, more, getattr(args, "log_path", None)
+        )
     if advice is not None:
         message += f"\n\n{advice}"
-    if args.no_popup:
-        logger.error("%s\n%s", title, message)
+    show_window(title, message)
+
+
+def _join_problems(problems: list[str], advice: str | None, separator: str) -> str:
+    message = separator.join(problems)
+    return message if advice is None else f"{message}\n\n{advice}"
+
+
+def _fit_problems(
+    problems: list[str], budget: int, separator: str
+) -> tuple[list[str], int, bool]:
+    """Picks the problems a popup has room for.
+
+    Whole problems are taken in order while they fit in budget characters,
+    counting the separators between them, and stop at the first that doesn't,
+    so the popup always shows "the first N". The first problem is always
+    shown; if it alone is over budget it is cut at a space and ends in "...".
+
+    Returns:
+        The problems to show, how many were left out, and whether the first
+        one was shortened.
+    """
+    if not problems:
+        return [], 0, False
+    first = problems[0]
+    if len(first) > budget:
+        cut = first[: max(budget - 3, 1)]
+        if " " in cut:
+            cut = cut.rsplit(" ", 1)[0]
+        return [cut.rstrip() + "..."], len(problems) - 1, True
+
+    shown = [first]
+    used = len(first)
+    for problem in problems[1:]:
+        used += len(separator) + len(problem)
+        if used > budget:
+            break
+        shown.append(problem)
+    return shown, len(problems) - len(shown), False
+
+
+def _left_out_note(
+    omitted: int, shortened: bool, more: tuple[str, str], log_path: Path | None
+) -> str:
+    """Says what a popup left out and where the full text is.
+
+    Only describes what actually happened: left-out problems, a shortened
+    one, or both.
+    """
+    count = f"...and {omitted} more {more[0] if omitted == 1 else more[1]}"
+    if omitted and shortened:
+        what = f"{count}, and the one above was shortened. "
+        target = "all of them in full"
+    elif omitted:
+        what = f"{count}. "
+        target = "all of them" if omitted > 1 else "that one"
     else:
-        show_popup(title, message)
+        what = "The message above was shortened. "
+        target = "the full message"
+    if log_path is None:
+        # log_to_file couldn't create the file, so only the console has it
+        return f"{what}The log file could not be created, so {target} can only be found in the console output."
+    return f"{what}See the log for {target}:\n{log_path}"
 
 
 def _load_entries(
@@ -271,30 +380,37 @@ def _load_entries(
             blockers,
             "Please close them and run the sync again. If an application is not visible in the task bar, "
             "use Task Manager (ctrl+alt+del) to close hidden instances.",
+            more=("application is open", "applications are open"),
         )
         return None
 
     try:
         if args.local_manifest is not None:
             logger.info(
-                "Reading the local manifest without checking out a branch..."
+                f"Reading {args.manifest} as it is, without checking out a branch..."
             )
         else:
-            if args.no_pull:
-                logger.info(
-                    f"Checking out the local copy of branch '{args.branch}' without pulling it..."
+            if manifest_state(args.manifest).dirty:
+                logger.warning(
+                    f"The manifest {args.manifest} has local edits, which are being "
+                    "discarded. To sync from the edited file instead, run with "
+                    "--local-manifest and no BRANCH."
                 )
-            else:
-                logger.info(
-                    f"Checking out the newest manifest from branch '{args.branch}'..."
-                )
-            checkout_manifest(args.manifest, args.branch, pull=not args.no_pull)
+            logger.info(
+                f"Checking out the newest manifest from branch '{args.branch}'..."
+            )
+            checkout_manifest(args.manifest, args.branch)
         # Logged before reading, so even a run stopped by a bad manifest says which commit it was
         state = manifest_state(args.manifest)
         _log_manifest_state(state)
         entries = select_entries(read_manifest(args.manifest), args.device)
     except ManifestError as e:
-        _report_problems(args, "Manifest Problem", e.problems)
+        _report_problems(
+            args,
+            "Manifest Problem",
+            e.problems,
+            more=("problem in the manifest", "problems in the manifest"),
+        )
         return None
 
     logger.info(f"{len(entries)} repos for device {args.device}")
@@ -369,7 +485,12 @@ def _run_sync(entries: list[ManifestEntry], args: argparse.Namespace) -> ExitCod
     )
     if failures:
         _report_problems(
-            args, "Sync Failed", [_describe_failure(result) for result in failures]
+            args,
+            "Sync Failed",
+            [_describe_failure(result) for result in failures],
+            more=("repo failed", "repos failed"),
+            # Two blank lines between repos, so each stands apart from the blank line in its own description
+            separator="\n\n\n",
         )
         return ExitCode.REPOS_NOT_OK
 
@@ -380,8 +501,14 @@ def _run_sync(entries: list[ManifestEntry], args: argparse.Namespace) -> ExitCod
 
 
 def _describe_failure(result: SyncResult) -> str:
-    """Returns one line describing a failed sync for the summary popup"""
-    return f"{result.repo.name} ({result.tag}): {short_error(result.error)}"
+    """Describes a failed sync for the summary popup: a marked lead-in line, a blank line, then the error
+
+    The popup is plain text, so an ASCII marker (safe in every console code page) stands in for a bold heading.
+    """
+    return (
+        f">> {result.repo.name} ({result.tag}) encountered an error:\n\n"
+        f"{short_error(result.error)}"
+    )
 
 
 if __name__ == "__main__":

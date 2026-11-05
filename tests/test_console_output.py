@@ -59,7 +59,7 @@ def test_popup_shown_on_top_and_closed(
     [record] = logged.records
     assert (
         record.levelno == logging.ERROR
-        and record.message == "Sync Failed\nMethod-A: tag not found"
+        and record.message == "Sync Failed\n\nMethod-A: tag not found"
     )
 
 
@@ -71,7 +71,7 @@ def test_popup_message_logged_even_if_window_fails(
 
     monkeypatch.setitem(sys.modules, "tkinter", types.SimpleNamespace(Tk=no_display))
     show_popup("Sync Failed", "details")
-    assert logged.messages == ["Sync Failed\ndetails"]
+    assert logged.messages == ["Sync Failed\n\ndetails"]
 
 
 def test_popup_without_tkinter(
@@ -79,7 +79,7 @@ def test_popup_without_tkinter(
 ) -> None:
     monkeypatch.setitem(sys.modules, "tkinter", None)
     show_popup("Sync Failed", "details")
-    assert logged.messages == ["Sync Failed\ndetails"]
+    assert logged.messages == ["Sync Failed\n\ndetails"]
 
 
 def test_real_tkinter_imports() -> None:

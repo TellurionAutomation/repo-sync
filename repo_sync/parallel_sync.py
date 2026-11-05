@@ -13,7 +13,7 @@ import git
 
 from repo_sync.console_output import logger
 from repo_sync.git_environment import configure_non_interactive_git
-from repo_sync.repo import Repository
+from repo_sync.repo import Repository, redact_urls
 
 DEFAULT_MAX_WORKERS = 4
 
@@ -154,12 +154,18 @@ _GIT_NOISE_PREFIXES = ("warning:", "hint:", "cloning into ")
 def short_error(error: Exception | None) -> str:
     """Returns a one-line description of error; git errors are reduced to git's own message.
 
+    Credentials in any URLs are hidden, since the result is shown and logged.
+
     Git can give the reason and the outcome on separate lines, e.g. on Windows
     "fatal: 'C:/x' does not appear to be a git repository" then "fatal: Could
     not read from remote repository.", or over SSH "Permission denied
     (publickey)." then the same fatal line. Every such line is kept, joined
     into one sentence, so the reason isn't lost.
     """
+    return redact_urls(_describe_error(error))
+
+
+def _describe_error(error: Exception | None) -> str:
     if not (isinstance(error, git.GitCommandError) and str(error.stderr).strip()):
         return str(error)
 

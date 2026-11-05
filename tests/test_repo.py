@@ -7,7 +7,7 @@ import git
 import pytest
 
 from git_helpers import head_commit, make_remote, run_git, tag_commit
-from repo_sync.repo import Repository
+from repo_sync.repo import Repository, redact_urls, suggest_tags
 from repo_sync.repo_status import RepositoryStatus
 
 
@@ -119,6 +119,92 @@ def test_check_origin_rejects_other_remote(clone: Repository, tmp_path: Path) ->
     other = make_remote(tmp_path / "other")
     with pytest.raises(ValueError, match="is a clone of"):
         Repository("test", str(other), clone.local_dir).check_origin()
+
+
+@pytest.mark.parametrize(
+    ("origin", "manifest_url"),
+    [
+        ("git@github.com:Org/repo.git", "ssh://git@github.com/Org/repo"),
+        ("ssh://git@github.com:22/Org/repo.git", "git@GitHub.com:Org/repo/"),
+        ("https://github.com/Org/repo.git", "https://user@GitHub.com/Org/repo/"),
+    ],
+)
+def test_check_origin_accepts_other_spellings_of_same_protocol(
+    clone: Repository, origin: str, manifest_url: str
+) -> None:
+    run_git(clone.local_dir, "remote", "set-url", "origin", origin)
+    Repository("test", manifest_url, clone.local_dir).check_origin()
+
+
+@pytest.mark.parametrize(
+    ("origin", "manifest_url", "origin_protocol", "protocol"),
+    [
+        ("https://github.com/Org/repo.git", "git@github.com:Org/repo.git", "HTTPS", "SSH"),
+        ("git@github.com:Org/repo.git", "https://github.com/Org/repo", "SSH", "HTTPS"),
+        ("ssh://git@github.com/Org/repo", "git://github.com/Org/repo.git", "SSH", "git"),
+    ],
+)
+def test_check_origin_explains_protocol_mismatch(
+    clone: Repository, origin: str, manifest_url: str, origin_protocol: str, protocol: str
+) -> None:
+    run_git(clone.local_dir, "remote", "set-url", "origin", origin)
+    with pytest.raises(ValueError) as raised:
+        Repository("test", manifest_url, clone.local_dir).check_origin()
+    message = str(raised.value)
+    assert "right repository" in message
+    assert f'over {origin_protocol} ("{origin}")' in message
+    assert f'manifest uses {protocol} ("{manifest_url}")' in message
+    assert "cloned again" in message and "change the manifest URL" in message
+
+
+def test_check_origin_hides_credentials(clone: Repository) -> None:
+    run_git(
+        clone.local_dir, "remote", "set-url", "origin", "https://ghp_secret@github.com/Org/repo"
+    )
+    manifest_url = "https://bob:hunter2@github.com/Org/other"
+    with pytest.raises(ValueError) as raised:
+        Repository("test", manifest_url, clone.local_dir).check_origin()
+    message = str(raised.value)
+    assert "ghp_secret" not in message and "hunter2" not in message
+    assert '"https://***@github.com/Org/repo"' in message
+
+
+# --- redact_urls --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("https://ghp_tok@github.com/o/r", "https://***@github.com/o/r"),
+        ("HTTP://user:pw@host/o/r", "HTTP://***@host/o/r"),
+        ("ssh://git:pw@host/o/r", "ssh://git:***@host/o/r"),
+        ("ssh://git@host/o/r", "ssh://git@host/o/r"),
+        ("git@github.com:o/r.git", "git@github.com:o/r.git"),
+        ("https://github.com/o/r", "https://github.com/o/r"),
+        (
+            "fatal: unable to access 'https://x:tok@h.com/r/': 403",
+            "fatal: unable to access 'https://***@h.com/r/': 403",
+        ),
+    ],
+)
+def test_redact_urls(text: str, expected: str) -> None:
+    assert redact_urls(text) == expected
+
+
+@pytest.mark.parametrize(
+    "manifest_url",
+    [
+        "git@github.com:Org/other.git",
+        "git@gitlab.com:Org/repo.git",
+        "https://github.com/Other/repo",
+    ],
+)
+def test_check_origin_rejects_other_network_remote(
+    clone: Repository, manifest_url: str
+) -> None:
+    run_git(clone.local_dir, "remote", "set-url", "origin", "https://github.com/Org/repo.git")
+    with pytest.raises(ValueError, match="is a clone of"):
+        Repository("test", manifest_url, clone.local_dir).check_origin()
 
 
 def test_check_origin_rejects_missing_origin(clone: Repository) -> None:
@@ -257,6 +343,26 @@ def test_checkout_missing_tag_warm_cache(
     assert remote_calls == []
 
 
+def test_checkout_missing_tag_suggests_tags_without_extra_remote_calls(
+    clone: Repository, remote_calls: list[str]
+) -> None:
+    # The cold path: the fetch fails, then the one ls-remote also supplies the suggestions
+    with pytest.raises(ValueError) as raised:
+        clone.checkout_tagged_commit("v3")
+    assert str(raised.value) == (
+        'Tag "v3" not found for repository "test". '
+        'Newest tags on the remote: "v2", "v1".'
+    )
+    assert remote_calls == ["fetch", "ls-remote"]
+
+
+def test_checkout_wrong_case_tag_says_did_you_mean(clone: Repository) -> None:
+    # Cached tags, so the check doesn't depend on whether the filesystem ignores case
+    clone.get_remote_tags()
+    with pytest.raises(ValueError, match='Did you mean "v2"\\? Tags are case-sensitive'):
+        clone.checkout_tagged_commit("V2")
+
+
 def test_checkout_stale_cache_needs_refresh(clone: Repository, remote: Path) -> None:
     clone.get_remote_tags()
     run_git(remote, "tag", "v3", "v1")
@@ -388,3 +494,45 @@ def test_describe_between_tags(clone: Repository) -> None:
     clone.checkout_tagged_commit("v2")
     run_git(clone.local_dir, "commit", "-q", "--allow-empty", "-m", "after v2")
     assert clone.describe_head().startswith("v2-1-g")
+
+
+# --- suggest_tags -------------------------------------------------------------
+
+MANY_TAGS = [f"v{a}.{b}.{c}" for a in range(10) for b in range(20) for c in range(25)]
+
+
+def test_suggest_tags_same_name_other_case() -> None:
+    assert suggest_tags("v1.0", ["V1.0", "v2.0"]) == (
+        'Did you mean "V1.0"? Tags are case-sensitive.'
+    )
+
+
+def test_suggest_tags_lists_every_case_variant() -> None:
+    assert suggest_tags("rc", ["RC", "Rc"]) == (
+        'Did you mean "RC" or "Rc"? Tags are case-sensitive.'
+    )
+
+
+@pytest.mark.parametrize("wanted", ["v1.0", "V1.0"])
+def test_suggest_tags_prefers_shared_start_over_difflib_ties(wanted: str) -> None:
+    # difflib rates "v1.0" as alike to "v9.1.0" as to "v1.0.0", and on its own picks v9.1.0
+    assert suggest_tags(wanted, MANY_TAGS) == (
+        'Closest tags on the remote: "v1.0.0", "v1.0.1", "v1.0.2".'
+    )
+
+
+def test_suggest_tags_close_spelling_ignores_case_and_punctuation() -> None:
+    assert suggest_tags("release-1.1", ["RELEASE_1.1", "RELEASE_1.0", "v3"]) == (
+        'Closest tags on the remote: "RELEASE_1.1", "RELEASE_1.0".'
+    )
+
+
+def test_suggest_tags_falls_back_to_newest_by_version() -> None:
+    # Version order, not text order, which would put "v10" before "v9"
+    assert suggest_tags("beta", ["v9", "v10", "v2", "v1"]) == (
+        'Newest tags on the remote: "v10", "v9", "v2".'
+    )
+
+
+def test_suggest_tags_remote_without_tags() -> None:
+    assert suggest_tags("v1", []) == "The remote has no tags."

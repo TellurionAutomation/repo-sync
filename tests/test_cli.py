@@ -32,24 +32,49 @@ def popups(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     """Records popups instead of showing them"""
     shown: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        cli, "show_popup", lambda title, message: shown.append((title, message))
+        cli, "show_window", lambda title, message: shown.append((title, message))
     )
     return shown
 
 
 class Lab:
-    """A manifest repo plus the remotes it points at, all under tmp_path.
+    """A manifest repo cloned from a manifest remote, plus the repo remotes it lists, all under tmp_path.
 
-    rows are committed to the branch being run just before each command, so
-    tests can change rows between runs.
+    Every remote is a local folder, so runs pull the manifest for real
+    without any network access. rows are committed to the manifest remote's
+    branch being run just before each command, so tests can change rows
+    between runs.
     """
 
     def __init__(self, tmp_path: Path):
         self.root = tmp_path
-        self.manifest_repo = tmp_path / "manifest-repo"
-        self.manifest = self.manifest_repo / "manifest.csv"
+        self.manifest_remote = tmp_path / "manifest-remote"
+        self.manifest = tmp_path / "manifest-local" / "manifest.csv"
         self.remotes: dict[str, Path] = {}
         self.rows: list[list[str]] = []
+
+    def commit(
+        self,
+        branch: str,
+        rows: list[list[str]] | None = None,
+        filename: str = "manifest.csv",
+    ) -> Path:
+        """Commits rows (default: self.rows) to branch of the manifest remote.
+
+        The manifest repo is cloned from the remote the first time; after
+        that it only changes when a run pulls. Returns self.manifest.
+        """
+        commit_manifest(
+            self.manifest_remote,
+            branch,
+            self.rows if rows is None else rows,
+            filename=filename,
+        )
+        if not self.manifest.parent.exists():
+            run_git(
+                self.root, "clone", "-q", str(self.manifest_remote), str(self.manifest.parent)
+            )
+        return self.manifest
 
     def add(
         self,
@@ -84,12 +109,11 @@ class Lab:
         return self.root / "check-results.csv"
 
     def run(self, command: str, branch: str, *args: str) -> int:
-        """Commits rows to branch, then runs command with that branch without pulling"""
-        commit_manifest(self.manifest_repo, branch, self.rows)
+        """Commits rows to branch, then runs command with that branch"""
+        self.commit(branch)
         extra = [
             "--manifest",
             str(self.manifest),
-            "--no-pull",
             "--log-dir",
             str(self.root / "logs"),
         ]
@@ -172,9 +196,9 @@ def test_sync_clones_and_checks_out_tags(lab: Lab, popups: list) -> None:
 
 def test_branches_list_different_tags(lab: Lab) -> None:
     lab.add("alpha", tag="v1")
-    commit_manifest(lab.manifest_repo, "test", lab.rows)
+    lab.commit("test")
     lab.rows[0][3] = "v2"
-    commit_manifest(lab.manifest_repo, "main", lab.rows)
+    lab.commit("main")
     remote = lab.remotes["alpha"]
 
     def sync_branch(branch: str) -> int:
@@ -185,7 +209,6 @@ def test_branches_list_different_tags(lab: Lab) -> None:
                 "ALL",
                 "--manifest",
                 str(lab.manifest),
-                "--no-pull",
                 "--no-pause",
                 "--log-dir",
                 str(lab.root / "logs"),
@@ -258,7 +281,8 @@ def test_sync_refuses_clone_of_old_url(lab: Lab, popups: list) -> None:
     lab.rows[0][1] = str(make_remote(lab.root / "remotes" / "alpha-moved"))
     assert lab.sync("main", "ALL") == ExitCode.REPOS_NOT_OK
     assert head_commit(lab.local("alpha")) == tag_commit(lab.remotes["alpha"], "v1")
-    assert "alpha (v1):" in popups[0][1] and "is a clone of" in popups[0][1]
+    assert ">> alpha (v1) encountered an error:\n\n" in popups[0][1]
+    assert "is a clone of" in popups[0][1]
 
 
 def test_sync_failures_reported_together(
@@ -283,12 +307,66 @@ def test_sync_failures_reported_together(
     assert head_commit(lab.local("good")) == tag_commit(lab.remotes["good"], "v2")
     [(title, message)] = popups
     assert title == "Sync Failed"
-    assert 'missing-tag (v9): Tag "v9" not found' in message
+    assert (
+        '>> missing-tag (v9) encountered an error:\n\nTag "v9" not found' in message
+    )
     # Git words this error differently on each platform, so only check a reason is given
-    assert re.search(r"bad-url \(v1\): \S", message)
+    assert re.search(r">> bad-url \(v1\) encountered an error:\n\n\S", message)
+    # Repos are two blank lines apart, one more than inside each description
+    assert re.search(r"\S\n\n\n>> ", message)
     assert "good" not in message
     [summary] = [r for r in logged.records if hasattr(r, "synced")]
     assert (summary.synced, summary.total) == (1, 3)
+    # Everything fit, so there is no note about left-out repos
+    assert "See the log" not in message and "more repo" not in message
+
+
+def test_long_failure_list_is_trimmed_in_popup_only(
+    lab: Lab,
+    popups: list,
+    logged: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names = [f"missing-{n}" for n in range(6)]
+    for name in names:
+        lab.add(name, tag="v9")
+    one = len(
+        '>> missing-0 (v9) encountered an error:\n\n'
+        'Tag "v9" not found for repository "missing-0". '
+        'Newest tags on the remote: "v2", "v1".'
+    )
+    # Room for two repos and the three blank lines between them, not a third
+    monkeypatch.setattr(cli.config, "POPUP_MAX_CHARS", 2 * one + 3 + 10)
+
+    assert lab.sync("main", "ALL") == ExitCode.REPOS_NOT_OK
+
+    [(title, message)] = popups
+    shown = [name for name in names if f">> {name} (v9)" in message]
+    assert shown == names[:2]
+    [log] = (lab.root / "logs").iterdir()
+    assert message.endswith(
+        f"...and 4 more repos failed. See the log for all of them:\n{log}"
+    )
+    # The log has every repo, in the logged summary as well as the file
+    [summary] = [r for r in logged.records if r.message.startswith("Sync Failed")]
+    assert all(f">> {name} (v9)" in summary.message for name in names)
+    assert "more repos failed" not in summary.message
+    assert all(f">> {name} (v9)" in log.read_text() for name in names)
+
+
+def test_long_manifest_problem_list_says_what_was_left_out(
+    lab: Lab, popups: list, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for n in range(5):
+        lab.add(f"repo-{n}", tag="")
+    monkeypatch.setattr(cli.config, "POPUP_MAX_CHARS", 30)
+
+    assert lab.sync("main", "ALL") == ExitCode.NOT_STARTED
+
+    [(title, message)] = popups
+    assert title == "Manifest Problem"
+    assert message.startswith("Row 2 (repo-0): Tag is blank\n\n")
+    assert "...and 4 more problems in the manifest. See the log for all of them:" in message
 
 
 def test_no_popup_flag(
@@ -308,7 +386,7 @@ def test_dry_run_changes_nothing(
     lab.add("alpha")
     assert lab.sync("main", "ALL", "--dry-run") == ExitCode.OK
     assert not lab.local("alpha").exists()
-    assert remote_calls == []
+    assert remote_calls == ["fetch"]  # Only the manifest is pulled; no repo is contacted
     [planned] = [r for r in logged.records if getattr(r, "repo", None) == "alpha"]
     assert planned.tag == "v2"
 
@@ -372,13 +450,12 @@ def test_duplicate_directories_stop_the_sync(lab: Lab, popups: list) -> None:
 
 @pytest.mark.parametrize("command", [SYNC_COMMAND, CHECK_COMMAND])
 def test_branch_without_manifest(lab: Lab, popups: list, command: str) -> None:
-    commit_manifest(lab.manifest_repo, "main", [], filename="something-else.csv")
+    lab.commit("main", [], filename="something-else.csv")
     code = cli.main(
         [
             command,
             "main",
             "ALL",
-            "--no-pull",
             "--manifest",
             str(lab.manifest),
             "--log-dir",
@@ -393,13 +470,12 @@ def test_branch_without_manifest(lab: Lab, popups: list, command: str) -> None:
 @pytest.mark.parametrize("command", [SYNC_COMMAND, CHECK_COMMAND])
 def test_unknown_branch(lab: Lab, popups: list, command: str) -> None:
     lab.add("alpha")
-    commit_manifest(lab.manifest_repo, "main", lab.rows)
+    lab.commit("main")
     code = cli.main(
         [
             command,
             "no-such-branch",
             "ALL",
-            "--no-pull",
             "--manifest",
             str(lab.manifest),
             "--log-dir",
@@ -455,10 +531,8 @@ def test_only_sync_checks_hamilton_apps(
 
 
 def clone_manifest_repo(lab: Lab) -> Path:
-    """Commits lab's rows to branch "main" of a manifest remote, clones it and returns the clone's manifest"""
-    commit_manifest(lab.root / "manifest-remote", "main", lab.rows)
-    run_git(lab.root, "clone", "-q", str(lab.root / "manifest-remote"), "manifest-local")
-    return lab.root / "manifest-local" / "manifest.csv"
+    """Commits lab's rows to branch "main" of the manifest remote, clones it and returns the clone's manifest"""
+    return lab.commit("main")
 
 
 def test_pulls_manifest_before_reading_it(lab: Lab) -> None:
@@ -507,29 +581,29 @@ def test_dry_run_still_pulls_the_manifest(lab: Lab) -> None:
     assert not lab.local("alpha").exists()
 
 
-def test_no_pull_skips_fetching(lab: Lab, remote_calls: list[str]) -> None:
+def test_sync_warns_before_discarding_manifest_edits(
+    lab: Lab, logged: pytest.LogCaptureFixture
+) -> None:
     lab.add("alpha", tag="v1")
     manifest = clone_manifest_repo(lab)
     lab.rows[0][3] = "v2"
-    commit_manifest(lab.root / "manifest-remote", "main", lab.rows)
-    remote_calls.clear()
+    write_manifest(manifest, lab.rows)
+    lab.rows[0][3] = "v1"
 
-    code = cli.main(
-        [
-            SYNC_COMMAND,
-            "main",
-            "ALL",
-            "--no-pull",
-            "--dry-run",
-            "--manifest",
-            str(manifest),
-            "--log-dir",
-            str(lab.root / "logs"),
-        ]
-    )
-    assert code == ExitCode.OK
-    assert remote_calls == []
+    assert lab.sync("main", "ALL", "--dry-run") == ExitCode.OK
+
+    [warning] = [r for r in logged.records if "local edits" in r.message]
+    assert warning.levelno == logging.WARNING and "--local-manifest" in warning.message
     assert ",v1," in manifest.read_text()
+
+
+def test_clean_manifest_gives_no_discard_warning(
+    lab: Lab, logged: pytest.LogCaptureFixture
+) -> None:
+    lab.add("alpha")
+    clone_manifest_repo(lab)
+    assert lab.sync("main", "ALL", "--dry-run") == ExitCode.OK
+    assert not [r for r in logged.records if "local edits" in r.message]
 
 
 @pytest.mark.parametrize("command", [SYNC_COMMAND, CHECK_COMMAND])
@@ -560,31 +634,75 @@ def test_pull_failure_stops_before_starting(
 def test_checks_out_the_given_branch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    calls: list[tuple[str, bool]] = []
+    calls: list[str] = []
     monkeypatch.setattr(
-        cli,
-        "checkout_manifest",
-        lambda path, branch, pull: calls.append((branch, pull)),
+        cli, "checkout_manifest", lambda path, branch: calls.append(branch)
     )
     manifest = write_manifest(tmp_path / "manifest.csv", [])
-    for extra in ([], ["--no-pull"]):
-        cli.main(
-            [
-                SYNC_COMMAND,
-                "any/branch-name",
-                "ALL",
-                *extra,
-                "--manifest",
-                str(manifest),
-                "--no-pause",
-                "--log-dir",
-                str(tmp_path / "logs"),
-            ]
-        )
-    assert calls == [("any/branch-name", True), ("any/branch-name", False)]
+    cli.main(
+        [
+            SYNC_COMMAND,
+            "any/branch-name",
+            "ALL",
+            "--manifest",
+            str(manifest),
+            "--no-pause",
+            "--log-dir",
+            str(tmp_path / "logs"),
+        ]
+    )
+    assert calls == ["any/branch-name"]
 
 
 # --- --local-manifest -------------------------------------------------------------
+
+
+def test_local_manifest_without_path_reads_usual_manifest_as_it_is(
+    lab: Lab, remote_calls: list[str], logged: pytest.LogCaptureFixture
+) -> None:
+    lab.add("alpha", tag="v1")
+    manifest = clone_manifest_repo(lab)
+    # Edited here, and changed on the remote too; neither the edit nor the remote is touched
+    lab.rows[0][3] = "v2"
+    write_manifest(manifest, lab.rows)
+    lab.rows[0][3] = "v3"
+    commit_manifest(lab.manifest_remote, "main", lab.rows)
+    remote_calls.clear()
+
+    code = cli.main(
+        [
+            SYNC_COMMAND,
+            "ALL",
+            "--manifest",
+            str(manifest),
+            "--local-manifest",
+            "--dry-run",
+            "--log-dir",
+            str(lab.root / "logs"),
+        ]
+    )
+
+    assert code == ExitCode.OK
+    assert remote_calls == []
+    assert ",v2," in manifest.read_text()
+    assert any("alpha: v2" in r.message for r in logged.records)
+    [record] = [r for r in logged.records if hasattr(r, "manifest_commit")]
+    assert record.manifest_dirty is True
+
+
+def test_local_manifest_without_path_defaults_to_usual_manifest() -> None:
+    args = cli.parse_args([SYNC_COMMAND, "device_b", "--local-manifest"])
+    assert (args.branch, args.device) == (None, "DEVICE_B")
+    assert args.manifest == args.local_manifest == cli.config.MANIFEST_PATH
+
+
+def test_local_manifest_path_mistaken_for_device_is_explained(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        cli.parse_args([SYNC_COMMAND, "--local-manifest", "DEVICE_B"])
+    assert "put --local-manifest after it" in capsys.readouterr().err
+
 
 
 def run_local_manifest(lab: Lab, command: str, *args: str) -> tuple[int, Path]:
@@ -669,7 +787,7 @@ def test_check_output_file(lab: Lab, tmp_path: Path, remote_calls: list[str]) ->
 
     output = tmp_path / "out.csv"
     assert lab.check("main", "ALL", "--output", str(output)) == ExitCode.REPOS_NOT_OK
-    assert remote_calls == []
+    assert remote_calls == ["fetch"]  # Only the manifest is pulled; no repo is contacted
 
     header, rows = read_output(output)
     assert header[:6] == [
@@ -684,7 +802,7 @@ def test_check_output_file(lab: Lab, tmp_path: Path, remote_calls: list[str]) ->
     assert header[10] == "Check Time:"
     assert header[13:18] == [
         "Manifest Commit Hash:",
-        head_commit(lab.manifest_repo),
+        head_commit(lab.manifest.parent),
         "",
         "Manifest Dirty:",
         "False",
@@ -749,11 +867,10 @@ def test_check_changes_nothing_but_writes_output(lab: Lab) -> None:
 def test_check_without_output_writes_no_file(lab: Lab) -> None:
     lab.add("alpha")
     lab.sync("main", "ALL")
-    commit_manifest(lab.manifest_repo, "main", lab.rows)
+    lab.commit("main")
     args = [
         "--manifest",
         str(lab.manifest),
-        "--no-pull",
         "--log-dir",
         str(lab.root / "logs"),
     ]
@@ -768,7 +885,7 @@ def test_manifest_commit_is_logged(
     lab.add("alpha")
     lab.run(command, "main", "ALL")
     [record] = [r for r in logged.records if hasattr(r, "manifest_commit")]
-    assert record.manifest_commit == head_commit(lab.manifest_repo)
+    assert record.manifest_commit == head_commit(lab.manifest.parent)
     assert record.manifest_dirty is False
     assert record.manifest_commit in "\n".join(
         log.read_text() for log in (lab.root / "logs").iterdir()
@@ -780,7 +897,7 @@ def test_edited_local_manifest_is_reported_dirty(
 ) -> None:
     # A --local-manifest inside a repo is traced to its commit, and edits to it show
     lab.add("alpha")
-    manifest = commit_manifest(lab.manifest_repo, "main", lab.rows)
+    manifest = lab.commit("main")
     lab.add("beta")
     write_manifest(manifest, lab.rows)
     code = cli.main(
@@ -815,11 +932,10 @@ def test_sync_arguments() -> None:
     args = cli.parse_args(
         [SYNC_COMMAND, "release/2.0", "device_b", "--dry-run", "--workers", "2"]
     )
-    assert (args.command, args.branch, args.device, args.no_pull) == (
+    assert (args.command, args.branch, args.device) == (
         SYNC_COMMAND,
         "release/2.0",
         "DEVICE_B",
-        False,
     )
     assert args.dry_run and args.workers == 2 and not args.no_pause
     assert args.manifest == cli.config.MANIFEST_PATH
@@ -831,7 +947,6 @@ def test_check_arguments() -> None:
             CHECK_COMMAND,
             "Main",
             "ALL",
-            "--no-pull",
             "--repo",
             "Method-A",
             "--output",
@@ -839,11 +954,10 @@ def test_check_arguments() -> None:
         ]
     )
     # Branch names are case-sensitive in git, so they are passed through unchanged
-    assert (args.command, args.branch, args.device, args.no_pull) == (
+    assert (args.command, args.branch, args.device) == (
         CHECK_COMMAND,
         "Main",
         "ALL",
-        True,
     )
     assert (args.repo, args.output) == ("Method-A", Path("out.csv"))
 
@@ -866,10 +980,67 @@ def test_check_arguments() -> None:
         [SYNC_COMMAND, "--local-manifest", "x.csv"],
         [SYNC_COMMAND, "main", "ALL", "--local-manifest", "x.csv"],
         [SYNC_COMMAND, "ALL", "--local-manifest", "x.csv", "--manifest", "y.csv"],
-        [SYNC_COMMAND, "ALL", "--local-manifest", "x.csv", "--no-pull"],
+        [SYNC_COMMAND, "ALL", "--no-pull"],
+        [SYNC_COMMAND, "main", "ALL", "--no-pull"],
+        [SYNC_COMMAND, "main", "ALL", "--local-manifest"],
     ],
 )
 def test_invalid_arguments(argv: list[str]) -> None:
     with pytest.raises(SystemExit) as info:
         cli.parse_args(argv)
     assert info.value.code == ExitCode.USAGE_ERROR
+
+
+# --- popup trimming -----------------------------------------------------------
+
+
+def test_fit_problems_keeps_everything_that_fits() -> None:
+    assert cli._fit_problems(["aa", "bb"], 6, "\n\n") == (["aa", "bb"], 0, False)
+
+
+def test_fit_problems_counts_separators() -> None:
+    assert cli._fit_problems(["aa", "bb"], 5, "\n\n") == (["aa"], 1, False)
+
+
+def test_fit_problems_stops_at_first_that_does_not_fit() -> None:
+    # "c" would fit after "a", but skipping "bbbb" would make the popup's list misleading
+    assert cli._fit_problems(["a", "bbbbbb", "c"], 5, "\n") == (["a"], 2, False)
+
+
+def test_fit_problems_shortens_only_an_oversized_first_problem() -> None:
+    shown, omitted, shortened = cli._fit_problems(
+        ["one two three four", "x"], 12, "\n"
+    )
+    assert (shown, omitted, shortened) == (["one two..."], 1, True)
+
+
+def test_fit_problems_with_no_problems() -> None:
+    assert cli._fit_problems([], 10, "\n") == ([], 0, False)
+
+
+@pytest.mark.parametrize(
+    ("omitted", "shortened", "expected"),
+    [
+        (1, False, "...and 1 more repo failed. See the log for that one:"),
+        (3, False, "...and 3 more repos failed. See the log for all of them:"),
+        (0, True, "The message above was shortened. See the log for the full message:"),
+        (
+            2,
+            True,
+            "...and 2 more repos failed, and the one above was shortened. "
+            "See the log for all of them in full:",
+        ),
+    ],
+)
+def test_left_out_note_describes_what_happened(
+    omitted: int, shortened: bool, expected: str
+) -> None:
+    log = Path("logs") / "sync.log"
+    note = cli._left_out_note(omitted, shortened, ("repo failed", "repos failed"), log)
+    assert note == f"{expected}\n{log}"
+
+
+def test_left_out_note_without_a_log_file() -> None:
+    note = cli._left_out_note(2, False, ("repo failed", "repos failed"), None)
+    assert "See the log" not in note
+    assert note.endswith("could not be created, so all of them can only be found in the console output.")
